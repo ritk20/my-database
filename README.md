@@ -4,4 +4,4 @@ A learning project aimed towards making a simple database utilizing C/C++ for wi
 
 ## Features
 
-- Basic GET, SET, DEL using C++ STL maps
+- Basic GET, SET, DEL using chaining hashtable
