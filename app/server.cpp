@@ -5,14 +5,13 @@
 #include <stdio.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <vector>
 #include <winsock2.h>
 #include <ws2tcpip.h>
-#include <windows.h>
+#include <string>
+#include <vector>
+#include <map>
 
-#define ssize_t ptrdiff_t
-
-#pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "Ws2_32.lib")
 
 static void msg(const char *msg)
 {
@@ -100,6 +99,126 @@ static int32_t accept_new_conn(std::vector<Conn *> &fd2conn, SOCKET fd)
 static void state_req(Conn *conn);
 static void state_res(Conn *conn);
 
+const size_t k_max_args = 1024;
+
+static int32_t parse_req(
+    const uint8_t *data, size_t len, std::vector<std::string> &out)
+{
+    if (len < 4)
+    {
+        return -1;
+    }
+    uint32_t n = 0;
+    memcpy(&n, &data[0], 4);
+    if (n > k_max_args)
+    {
+        return -1;
+    }
+
+    size_t pos = 4;
+    while (n--)
+    {
+        if (pos + 4 > len)
+        {
+            return -1;
+        }
+        uint32_t sz = 0;
+        memcpy(&sz, &data[pos], 4);
+        if (pos + 4 + sz > len)
+        {
+            return -1;
+        }
+        out.push_back(std::string((char *)&data[pos + 4], sz));
+        pos += 4 + sz;
+    }
+
+    if (pos != len)
+    {
+        return -1; // trailing garbage
+    }
+    return 0;
+}
+
+enum
+{
+    RES_OK = 0,
+    RES_ERR = 1,
+    RES_NX = 2,
+};
+
+static std::map<std::string, std::string> g_map;
+
+static uint32_t do_get(
+    const std::vector<std::string> &cmd, uint8_t *res, uint32_t *reslen)
+{
+    if (!g_map.count(cmd[1]))
+    {
+        return RES_NX;
+    }
+    std::string &val = g_map[cmd[1]];
+    assert(val.size() <= k_max_msg);
+    memcpy(res, val.data(), val.size());
+    *reslen = (uint32_t)val.size();
+    return RES_OK;
+}
+
+static uint32_t do_set(
+    const std::vector<std::string> &cmd, uint8_t *res, uint32_t *reslen)
+{
+    (void)res;
+    (void)reslen;
+    g_map[cmd[1]] = cmd[2];
+    return RES_OK;
+}
+
+static uint32_t do_del(
+    const std::vector<std::string> &cmd, uint8_t *res, uint32_t *reslen)
+{
+    (void)res;
+    (void)reslen;
+    g_map.erase(cmd[1]);
+    return RES_OK;
+}
+
+static bool cmd_is(const std::string &word, const char *cmd)
+{
+    return _stricmp(word.c_str(), cmd) == 0;
+}
+
+static int32_t do_request(
+    const uint8_t *req, uint32_t reqlen,
+    uint32_t *rescode, uint8_t *res, uint32_t *reslen)
+{
+    std::vector<std::string> cmd;
+    if (0 != parse_req(req, reqlen, cmd))
+    {
+        msg("bad req");
+        return -1;
+    }
+    if (cmd.size() == 2 && cmd_is(cmd[0], "get"))
+    {
+        *rescode = do_get(cmd, res, reslen);
+    }
+    else if (cmd.size() == 3 && cmd_is(cmd[0], "set"))
+    {
+        *rescode = do_set(cmd, res, reslen);
+    }
+    else if (cmd.size() == 2 && cmd_is(cmd[0], "del"))
+    {
+        *rescode = do_del(cmd, res, reslen);
+    }
+    else
+    {
+        // cmd is not recognized
+        *rescode = RES_ERR;
+        const char *msg = "Unknown cmd";
+        strcpy((char *)res, msg);
+        *reslen = strlen(msg);
+        return 0;
+    }
+    return 0;
+}
+
 static bool try_one_request(Conn *conn)
 {
     // try to parse a request from the buffer
@@ -122,17 +241,22 @@ static bool try_one_request(Conn *conn)
         return false;
     }
 
-    // got one request, do something with it
-    printf("client says: %.*s\n", len, &conn->rbuf[4]);
+    // got one request, generate the response.
+    uint32_t rescode = 0;
+    uint32_t wlen = 0;
+    int32_t err = do_request(
+        &conn->rbuf[4], len,
+        &rescode, &conn->wbuf[4 + 4], &wlen);
+    if (err)
+    {
+        conn->state = STATE_END;
+        return false;
+    }
+    wlen += 4;
+    memcpy(&conn->wbuf[0], &wlen, 4);
+    memcpy(&conn->wbuf[4], &rescode, 4);
+    conn->wbuf_size = 4 + wlen;
 
-    // generating echoing response
-    memcpy(&conn->wbuf[0], &len, 4);
-    memcpy(&conn->wbuf[4], &conn->rbuf[4], len);
-    conn->wbuf_size = 4 + len;
-
-    // remove the request from the buffer.
-    // note: frequent memmove is inefficient.
-    // note: need better handling for production code.
     size_t remain = conn->rbuf_size - 4 - len;
     if (remain)
     {
@@ -156,7 +280,7 @@ static bool try_fill_buffer(Conn *conn)
     do
     {
         size_t cap = sizeof(conn->rbuf) - conn->rbuf_size;
-        rv = recv(conn->fd, (char *)&conn->rbuf[conn->rbuf_size], cap, 0);
+        rv = recv(conn->fd, (char *)&conn->rbuf[conn->rbuf_size], (int)cap, 0);
     } while (rv < 0 && WSAGetLastError() == WSAEINTR);
     if (rv < 0 && WSAGetLastError() == WSAEWOULDBLOCK)
     {
@@ -186,8 +310,6 @@ static bool try_fill_buffer(Conn *conn)
     conn->rbuf_size += (size_t)rv;
     assert(conn->rbuf_size <= sizeof(conn->rbuf));
 
-    // Try to process requests one by one.
-    // Why is there a loop? Please read the explanation of "pipelining".
     while (try_one_request(conn))
     {
     }
@@ -203,11 +325,11 @@ static void state_req(Conn *conn)
 
 static bool try_flush_buffer(Conn *conn)
 {
-    ssize_t rv = 0;
+    int rv = 0;
     do
     {
         size_t remain = conn->wbuf_size - conn->wbuf_sent;
-        rv = send(conn->fd, (const char *)&conn->wbuf[conn->wbuf_sent], remain, 0);
+        rv = send(conn->fd, (char *)&conn->wbuf[conn->wbuf_sent], (int)remain, 0);
     } while (rv < 0 && WSAGetLastError() == WSAEINTR);
     if (rv < 0 && WSAGetLastError() == WSAEWOULDBLOCK)
     {
@@ -281,14 +403,14 @@ int main()
     addr.sin_port = htons(1234);
     addr.sin_addr.s_addr = htonl(INADDR_ANY); // wildcard address 0.0.0.0
     int rv = bind(fd, (const sockaddr *)&addr, sizeof(addr));
-    if (rv)
+    if (rv == SOCKET_ERROR)
     {
         die("bind()");
     }
 
     // listen
     rv = listen(fd, SOMAXCONN);
-    if (rv)
+    if (rv == SOCKET_ERROR)
     {
         die("listen()");
     }
@@ -299,46 +421,40 @@ int main()
     // set the listen fd to nonblocking mode
     fd_set_nb(fd);
 
-    // the event loop
+    fd_set read_fds, write_fds, except_fds;
+    int max_fd = fd;
+
     while (true)
     {
-        fd_set readfds, writefds, exceptfds;
-        FD_ZERO(&readfds);
-        FD_ZERO(&writefds);
-        FD_ZERO(&exceptfds);
+        FD_ZERO(&read_fds);
+        FD_ZERO(&write_fds);
+        FD_ZERO(&except_fds);
 
-        // Add the listening fd to the read set
-        FD_SET(fd, &readfds);
+        FD_SET(fd, &read_fds);
+        FD_SET(fd, &except_fds);
 
-        // Add connection fds to the appropriate sets
         for (Conn *conn : fd2conn)
         {
             if (!conn)
             {
                 continue;
             }
-            if (conn->state == STATE_REQ)
+            FD_SET(conn->fd, (conn->state == STATE_REQ) ? &read_fds : &write_fds);
+            FD_SET(conn->fd, &except_fds);
+            if (conn->fd > max_fd)
             {
-                FD_SET(conn->fd, &readfds);
+                max_fd = conn->fd;
             }
-            else if (conn->state == STATE_RES)
-            {
-                FD_SET(conn->fd, &writefds);
-            }
-            FD_SET(conn->fd, &exceptfds);
         }
 
-        // Use select instead of WSAPoll
-        int rv = select(0, &readfds, &writefds, &exceptfds, NULL);
+        int rv = select(max_fd + 1, &read_fds, &write_fds, &except_fds, NULL);
         if (rv == SOCKET_ERROR)
         {
-            die("select failed");
+            die("select");
         }
 
-        // Check which file descriptors are ready
-        if (FD_ISSET(fd, &readfds))
+        if (FD_ISSET(fd, &read_fds))
         {
-            // Try to accept a new connection if the listening fd is active
             (void)accept_new_conn(fd2conn, fd);
         }
 
@@ -348,15 +464,13 @@ int main()
             {
                 continue;
             }
-            if (FD_ISSET(conn->fd, &readfds) || FD_ISSET(conn->fd, &writefds) || FD_ISSET(conn->fd, &exceptfds))
+            if (FD_ISSET(conn->fd, &read_fds) || FD_ISSET(conn->fd, &write_fds) || FD_ISSET(conn->fd, &except_fds))
             {
                 connection_io(conn);
                 if (conn->state == STATE_END)
                 {
-                    // client closed normally, or something bad happened.
-                    // destroy this connection
                     fd2conn[conn->fd] = NULL;
-                    closesocket(conn->fd);
+                    (void)closesocket(conn->fd);
                     free(conn);
                 }
             }
