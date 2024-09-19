@@ -3,7 +3,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-// hashtable node, should be embedded into the payload
+// hashtable node
 struct HNode
 {
     HNode *next = NULL;
@@ -18,8 +18,7 @@ struct HTab
     size_t size = 0;
 };
 
-// the real hashtable interface.
-// it uses 2 hashtables for progressive resizing.
+// 2 hashtables for progressive resizing.
 struct HMap
 {
     HTab ht1; // newer
