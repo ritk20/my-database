@@ -193,3 +193,42 @@ AVLNode *avl_del(AVLNode *node)
         }
     }
 }
+
+AVLNode *avl_offset(AVLNode *node, int64_t offset)
+{
+    int64_t pos = 0; // relative to the starting node
+    while (offset != pos)
+    {
+        if (pos < offset && pos + avl_count(node->right) >= offset)
+        {
+            // the target is inside the right subtree
+            node = node->right;
+            pos += avl_count(node->left) + 1;
+        }
+        else if (pos > offset && pos - avl_count(node->left) <= offset)
+        {
+            // the target is inside the left subtree
+            node = node->left;
+            pos -= avl_count(node->right) + 1;
+        }
+        else
+        {
+            // go to the parent
+            AVLNode *parent = node->parent;
+            if (!parent)
+            {
+                return NULL;
+            }
+            if (parent->right == node)
+            {
+                pos -= avl_count(node->left) + 1;
+            }
+            else
+            {
+                pos += avl_count(node->right) + 1;
+            }
+            node = parent;
+        }
+    }
+    return node;
+}
