@@ -22,7 +22,7 @@ static ZNode *znode_new(const std::string &name, double score)
   return node;
 }
 
-static uint32_t min(size_t lhs, size_t rhs)
+static uint32_t min_size(std::size_t lhs, std::size_t rhs)
 {
   return lhs < rhs ? lhs : rhs;
 }
@@ -36,7 +36,7 @@ static bool zless(
   {
     return zl->score < score;
   }
-  int rv = memcmp(zl->name.c_str(), name.c_str(), min(zl->name.size(), name.size()));
+  int rv = memcmp(zl->name.c_str(), name.c_str(), min_size(zl->name.size(), name.size()));
   if (rv != 0)
   {
     return rv < 0;
@@ -95,13 +95,6 @@ bool zset_add(ZSet *zset, const std::string &name, double score)
     return true;
   }
 }
-
-// a helper structure for the hashtable lookup
-struct HKey
-{
-  HNode node;
-  std::string name;
-};
 
 static bool hcmp(HNode *node, HNode *key)
 {

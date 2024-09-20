@@ -1,4 +1,5 @@
-#pragma once
+#ifndef HASHTABLE_H
+#define HASHTABLE_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -31,3 +32,5 @@ void hm_insert(HMap *hmap, HNode *node);
 HNode *hm_pop(HMap *hmap, HNode *key, bool (*eq)(HNode *, HNode *));
 size_t hm_size(HMap *hmap);
 void hm_destroy(HMap *hmap);
+
+#endif // HASHTABLE_H
